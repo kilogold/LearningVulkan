@@ -159,7 +159,6 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="reference.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="shaders\base.frag" />
