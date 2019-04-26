@@ -8,26 +8,33 @@
 #include <algorithm>
 #include <optional>
 #include <set>
+#include <unordered_map>
 #include <array>
 #include <fstream>
+#include <chrono>
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
+#include <glm/gtx/hash.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <chrono>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
+
+// Globals
 const int WIDTH = 800;
 const int HEIGHT = 600;
 const int MAX_FRAMES_IN_FLIGHT = 2;
-
+const std::string MODEL_PATH = "models/treasure_chest.obj";
+const std::string TEXTURE_PATH = "textures/treasure_chest.JPG";
 const std::vector<const char*> validationLayers = {
 	"VK_LAYER_LUNARG_standard_validation"
 };
-
 const std::vector<const char*> deviceExtensions = {
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME
 };
@@ -138,29 +145,30 @@ struct Vertex
 
 		return attributeDescriptions;
 	}
+
+	bool operator==(const Vertex& other) const
+	{
+		return pos == other.pos && color == other.color && texCoord == other.texCoord;
+	}
 };
+
+namespace std 
+{
+	template<> struct hash<Vertex> 
+	{
+		size_t operator()(Vertex const& vertex) const
+		{
+			return ((hash<glm::vec3>()(vertex.pos) ^
+				(hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^
+				(hash<glm::vec2>()(vertex.texCoord) << 1);
+		}
+	};
+} // namespace std
 
 struct UniformBufferObject {
 	glm::mat4 model;
 	glm::mat4 view;
 	glm::mat4 proj;
-};
-
-const std::vector<Vertex> vertices = {
-    {{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-    {{0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-    {{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-    {{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}},
-
-    {{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-    {{0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-    {{0.5f, 0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-    {{-0.5f, 0.5f, -0.5f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}}
-};
-
-const std::vector<uint16_t> indices = {
-    0, 1, 2, 2, 3, 0,
-    4, 5, 6, 6, 7, 4
 };
 
 class HelloTriangleApplication
@@ -227,6 +235,9 @@ private:
 	size_t currentFrame = 0;
 	bool framebufferResized = false;
 
+	// Geometry data loaded in from file IO.
+	std::vector<Vertex> vertices;
+	std::vector<uint32_t> indices;
 	VkBuffer vertexBuffer;
 	VkBuffer indexBuffer;
 	VkDeviceMemory vertexBufferMemory;
@@ -277,6 +288,7 @@ private:
 		createCommandPools();
 		createDepthResources();
 		createFramebuffers();
+		loadModel(false);
 		createVertexBuffer();
 		createIndexBuffer();
 		createUniformBuffer();
@@ -287,6 +299,80 @@ private:
 		createDescriptorSets();
 		createCommandBuffers();
 		createSyncObjects();
+	}
+
+	void loadModel(bool optimalMemoryUsage)
+	{
+		tinyobj::attrib_t attrib;
+		std::vector<tinyobj::shape_t> shapes;
+		std::vector<tinyobj::material_t> materials;
+		std::string warn, err;
+
+		if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, MODEL_PATH.c_str()))
+		{
+			throw std::runtime_error(warn + err);
+		}
+
+		std::unordered_map<Vertex, uint32_t> uniqueVerts = {};
+		
+		for (const auto& shape : shapes)
+		{
+			for(const auto& index : shape.mesh.indices)
+			{
+				Vertex newVert = {};
+
+				const int vertex_component_stride_pos = 3;
+				const int x_component_offset = 0; 
+				const int y_component_offset = 1; 
+				const int z_component_offset = 2; 
+
+				const int vertex_component_stride_col = 2;
+				const int u_component_offset = 0; 
+				const int v_component_offset = 1; 
+
+				newVert.pos = { 
+					attrib.vertices[vertex_component_stride_pos * index.vertex_index + x_component_offset],
+					attrib.vertices[vertex_component_stride_pos * index.vertex_index + y_component_offset],
+					attrib.vertices[vertex_component_stride_pos * index.vertex_index + z_component_offset],
+				};
+
+				newVert.texCoord = {
+					attrib.texcoords[vertex_component_stride_col * index.texcoord_index + u_component_offset],
+
+					/******************************************
+					* The OBJ format assumes a coordinate system where a vertical coordinate of 0 means the bottom 
+					* of the image, however we've uploaded our image into Vulkan in a top to bottom orientation where 
+					* 0 means the top of the image. We solve this by flipping the vertical component of the texture coordinates.
+					*******************************************/
+					1.0f - attrib.texcoords[vertex_component_stride_col * index.texcoord_index + v_component_offset]
+				};
+
+				newVert.color = { 1.0f, 1.0f, 1.0f };
+
+
+				if (optimalMemoryUsage)
+				{
+					if (uniqueVerts.count(newVert) == 0)
+					{
+						// Generate new index
+						uniqueVerts[newVert] = static_cast<uint32_t>(vertices.size());
+
+						// Generate & assign new vertex
+						vertices.push_back(newVert);
+
+						// We generate index before assigning because we need 0-based index.
+					}
+
+					// Assign index
+					indices.push_back(uniqueVerts[newVert]);
+				}
+				else
+				{
+					indices.push_back(static_cast<uint32_t>(vertices.size()));
+					vertices.push_back(newVert);
+				}
+			}
+		}
 	}
 
 	VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features)
@@ -317,7 +403,7 @@ private:
 		);
 	}
 
-	bool hasStencilComponent(VkFormat format)
+	bool hasStencilComponent(VkFormat format) const
 	{
 		return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
 	}
@@ -395,7 +481,7 @@ private:
 	void createTextureImage()
 	{
 		int texWidth, texHeight, texChannels;
-		stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+		stbi_uc* pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 		const VkDeviceSize imageSize = texWidth * texHeight * 4;
 
 		if (!pixels)
@@ -481,11 +567,23 @@ private:
 		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		barrier.image = image;
-		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		barrier.subresourceRange.baseMipLevel = 0;
 		barrier.subresourceRange.levelCount = 1;
 		barrier.subresourceRange.baseArrayLayer = 0;
 		barrier.subresourceRange.layerCount = 1;
+
+		if (newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+		{
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			if (hasStencilComponent(format))
+			{
+				barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+			}
+		}
+		else
+		{
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		}
 
 		VkPipelineStageFlags sourceStage;
 		VkPipelineStageFlags destinationStage;
@@ -907,7 +1005,7 @@ private:
 			VkBuffer vertexBuffers[] = { vertexBuffer };
 			VkDeviceSize offsets[] = { 0 };
 			vkCmdBindVertexBuffers(graphicsCommandBuffers[i], 0, 1, vertexBuffers, offsets);
-			vkCmdBindIndexBuffer(graphicsCommandBuffers[i], indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+			vkCmdBindIndexBuffer(graphicsCommandBuffers[i], indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 			vkCmdBindDescriptorSets(graphicsCommandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[i], 0, nullptr);
 
 			vkCmdDrawIndexed(graphicsCommandBuffers[i], static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
@@ -1156,18 +1254,6 @@ private:
 		depthStencil.front = {}; // Optional
 		depthStencil.back = {}; // Optional
 
-		// Let's not have a dynamic state....
-		//VkDynamicState dynamicStates[] = 
-		//{
-		//	VK_DYNAMIC_STATE_VIEWPORT,
-		//	VK_DYNAMIC_STATE_LINE_WIDTH
-		//};
-
-		//VkPipelineDynamicStateCreateInfo dynamicState = {};
-		//dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-		//dynamicState.dynamicStateCount = 2;
-		//dynamicState.pDynamicStates = dynamicStates;
-
 		VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
 		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 		pipelineLayoutInfo.setLayoutCount = 1;
@@ -1247,6 +1333,7 @@ private:
 		cleanupSwapChain();
 
 		createSwapChain();
+		createDepthResources();
 		createImageViews();
 		createRenderPass();
 		createGraphicsPipeline();
@@ -1644,7 +1731,7 @@ private:
 		const float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
 		UniformBufferObject ubo;
-		ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+		ubo.model = glm::rotate(glm::mat4(1.0f), time/3.0f * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 		ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 		ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / static_cast<float>(swapChainExtent.height), 0.1f, 10.0f);
 		// Invert Y-scaling in projection because Vulkan's normalized device coordinates is right-handed, with positive Y-Axis pointing downward.
@@ -1728,6 +1815,10 @@ private:
 	{
 		vkFreeCommandBuffers(device, graphicsCommandPool, static_cast<uint32_t>(graphicsCommandBuffers.size()), graphicsCommandBuffers.data());
 		//TODO: Transfer command pools must be freed here too.
+
+		vkDestroyImageView(device, depthImageView, nullptr);
+		vkDestroyImage(device, depthImage, nullptr);
+		vkFreeMemory(device, depthImageMemory, nullptr);
 
 		for (auto imageView : swapChainImageViews)
 		{
