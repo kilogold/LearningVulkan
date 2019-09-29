@@ -30,8 +30,8 @@
 const int WIDTH = 800;
 const int HEIGHT = 600;
 const int MAX_FRAMES_IN_FLIGHT = 2;
-const std::string MODEL_PATH = "models/treasure_chest.obj";
-const std::string TEXTURE_PATH = "textures/treasure_chest.JPG";
+const std::string MODEL_PATH = "models/chalet.obj";
+const std::string TEXTURE_PATH = "textures/chalet.jpg";
 const std::vector<const char*> validationLayers = {
 	"VK_LAYER_LUNARG_standard_validation"
 };
